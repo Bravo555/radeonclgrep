@@ -1,4 +1,4 @@
-use chrono::prelude::*;
+use chrono::{offset::TimeZone, prelude::*, Date};
 use regex::Regex;
 use reqwest::{header, Client};
 use scraper::{ElementRef, Html, Selector};
@@ -12,15 +12,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "(?i:{})",
         &env::args().nth(1).expect("expected pattern"),
     ))?;
-
     let current_date = Utc::today();
-    let version_url = format_url(current_date.format("%y"), current_date.month(), 2);
-
     let client = http_client()?;
-    let response = client.get(&version_url).send().await?.text().await?;
 
-    print_page_hits(&response, &pattern);
+    let responses =
+        tokio::spawn(async move { get_month_revisions(&client, &current_date).await.unwrap() })
+            .await?;
 
+    for response in responses {
+        print_page_hits(&response, &pattern);
+    }
     Ok(())
 }
 
@@ -57,4 +58,28 @@ fn print_page_hits(response: &str, pattern: &Regex) {
     for hit in hits {
         println!("{}", hit);
     }
+}
+
+async fn get_month_revisions<Tz: TimeZone>(
+    client: &Client,
+    date: &Date<Tz>,
+) -> reqwest::Result<Vec<String>>
+where
+    <Tz as TimeZone>::Offset: Display,
+{
+    let mut current_revision = 1;
+    let mut revisions = Vec::new();
+
+    loop {
+        let version_url = format_url(date.format("%y"), date.month(), current_revision);
+        let response = client.get(&version_url).send().await?;
+
+        if !response.status().is_success() {
+            break;
+        }
+        revisions.push(response.text().await?);
+        current_revision += 1;
+    }
+
+    Ok(revisions)
 }
