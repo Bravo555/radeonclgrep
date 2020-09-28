@@ -1,4 +1,4 @@
-use chrono::{offset::TimeZone, prelude::*, Date};
+use chrono::{prelude::*, NaiveDate};
 use regex::Regex;
 use reqwest::{header, Client};
 use scraper::{ElementRef, Html, Selector};
@@ -8,20 +8,47 @@ use std::fmt::Display;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let DATE_THRESHOLD: NaiveDate = NaiveDate::from_ymd(2020, 1, 1);
+
+    let current_date = Utc::today().naive_utc();
+    let months = {
+        let mut current = current_date.clone();
+        let mut months = Vec::new();
+        while current > DATE_THRESHOLD {
+            months.push(current.clone());
+            current = current
+                .with_month(current.month() - 1)
+                .or(current
+                    .with_year(current.year() - 1)
+                    .expect("previous month creation failed")
+                    .with_month(12))
+                .expect("previous month construction failed");
+        }
+        months
+    };
+    println!("{:#?}", months);
+
     let pattern = Regex::new(&format!(
         "(?i:{})",
         &env::args().nth(1).expect("expected pattern"),
     ))?;
-    let current_date = Utc::today();
     let client = http_client()?;
 
-    let responses =
-        tokio::spawn(async move { get_month_revisions(&client, &current_date).await.unwrap() })
-            .await?;
+    let responses: Vec<_> = months
+        .into_iter()
+        // we use a helper map here because we cant clone http client in a move block
+        .map(|date| (date, client.clone()))
+        .map(|(date, client)| {
+            tokio::spawn(async move { get_month_revisions(&client, &date).await.unwrap() })
+        })
+        .collect();
 
     for response in responses {
-        print_page_hits(&response, &pattern);
+        for revision in response.await.unwrap() {
+            print_page_hits(&revision, &pattern);
+        }
     }
+
     Ok(())
 }
 
@@ -60,18 +87,13 @@ fn print_page_hits(response: &str, pattern: &Regex) {
     }
 }
 
-async fn get_month_revisions<Tz: TimeZone>(
-    client: &Client,
-    date: &Date<Tz>,
-) -> reqwest::Result<Vec<String>>
-where
-    <Tz as TimeZone>::Offset: Display,
-{
+async fn get_month_revisions(client: &Client, date: &NaiveDate) -> reqwest::Result<Vec<String>> {
     let mut current_revision = 1;
     let mut revisions = Vec::new();
 
     loop {
         let version_url = format_url(date.format("%y"), date.month(), current_revision);
+        println!("trying {}", version_url);
         let response = client.get(&version_url).send().await?;
 
         if !response.status().is_success() {
